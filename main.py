@@ -8,10 +8,13 @@ from aiogram.types import Message
 from io import BytesIO
 from PIL import Image
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
-
+import math
 
 YANDEX_API_KEY = '8013b162-6b42-4997-9691-77b7074026e0'
 BOT_TOKEN = '7253763825:AAHLEW4kCm7b-eOTcRwgtKSNpcqiVABfaDA'
+
+user_address = None
+city = None
 
 
 # Инициализация базы данных
@@ -45,7 +48,7 @@ dp = Dispatcher()
 
 start_kb = ReplyKeyboardMarkup(keyboard=[[
     KeyboardButton(text="Найти"),
-    KeyboardButton(text="Статистика")], [KeyboardButton(text="Очистить данные")]],
+    KeyboardButton(text="Статистика")], [KeyboardButton(text="Очистить данные")], [KeyboardButton(text="Адрес")]],
     resize_keyboard=True)
 
 
@@ -55,6 +58,7 @@ class Form(StatesGroup):
     city = State()
     find = State()
     out = State()
+    waiting_for_address = State()
 
 
 # сохранение информации пользователя
@@ -69,6 +73,7 @@ def save_user_search(user_id, username, first_name, last_name, brand, model, cit
 
     conn.commit()
     conn.close()
+
 
 # поиск информации пользователя
 def get_user_searches(username):
@@ -102,6 +107,135 @@ def clear_user_data(user_id):
     return deleted_rows
 
 
+def get_coords(city, address):
+    url = "https://geocode-maps.yandex.ru/1.x/"
+    params = {
+        "apikey": YANDEX_API_KEY,
+        "geocode": f"{address} в {city}",
+        "format": "json"
+    }
+
+    response = requests.get(url, params=params)
+    data = response.json()
+
+    # Извлечение координат
+    feature = data["response"]["GeoObjectCollection"]["featureMember"][0]["GeoObject"]
+    longitude, latitude = feature["Point"]["pos"].split()
+
+    return {"широта": float(latitude), "долгота": float(longitude)}
+
+
+
+def find_auto_services(brand, model, city):
+    # Ввод данных через консоль
+
+
+
+    search_text = f"Автосервис {brand} {model} в {city}"
+
+    # Запрос к API Яндекс.Карт
+    geocoder_url = "https://geocode-maps.yandex.ru/1.x/"
+    params = {
+        "apikey": YANDEX_API_KEY,
+        "geocode": search_text,
+        "format": "json",
+        "results": 25,
+        "lang": "ru_RU"
+    }
+
+    response = requests.get(geocoder_url, params=params)
+    data = response.json()
+
+    features = data["response"]["GeoObjectCollection"]["featureMember"]
+    if not features:
+        return {}
+
+    # Формируем словарь с результатами
+    results = {}
+    for i, feature in enumerate(features, 1):
+        geo_object = feature["GeoObject"]
+        address = geo_object["metaDataProperty"]["GeocoderMetaData"]["text"]
+        longitude, latitude = geo_object["Point"]["pos"].split()
+
+        results[f"Автосервис {i}"] = {
+            "адрес": address,
+            "координаты": {
+                "широта": latitude,
+                "долгота": longitude
+            }
+        }
+
+    return results
+
+
+def calculate_distance(lat1, lon1, lat2, lon2):
+    """
+    Вычисляет расстояние между двумя точками
+    """
+    R = 6371
+
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    return R * c
+
+
+def sort_services_by_distance(services, target_point):
+    """
+    Сортирует автосервисы по расстоянию до точки
+    """
+    target_lat = target_point['широта']
+    target_lon = target_point['долгота']
+
+    for name, service in services.items():
+        try:
+            service_lat = float(service['координаты']['широта'])
+            service_lon = float(service['координаты']['долгота'])
+            distance = calculate_distance(target_lat, target_lon, service_lat, service_lon)
+            service['расстояние_км'] = round(distance, 2)
+        except (KeyError, ValueError):
+            service['расстояние_км'] = float('inf')
+
+    sorted_services = dict(sorted(
+        services.items(),
+        key=lambda item: item[1]['расстояние_км']
+    ))
+
+    return sorted_services
+
+
+async def send_map_image(message: Message, coordinates: tuple, zoom=15):
+    map_params = {
+        "ll": f"{coordinates[0]},{coordinates[1]}",
+        "l": "map",
+        "z": str(zoom),
+        "size": "650,450",
+        "pt": f"{coordinates[0]},{coordinates[1]},pm2rdm"  # Добавляем метку
+    }
+
+    map_url = "https://static-maps.yandex.ru/1.x/"
+    response = requests.get(map_url, params=map_params)
+
+    if response.status_code == 200:
+        img_bytes = BytesIO()
+        img = Image.open(BytesIO(response.content))
+        img.save(img_bytes, format='PNG')
+        img_bytes.seek(0)
+
+        await message.answer_photo(
+            types.BufferedInputFile(img_bytes.read(), filename="map.png"),
+            caption="Местоположение автосервиса"
+        )
+    else:
+        await message.answer("Не удалось загрузить карту")
+
+
+
 @dp.message(Command("start"))
 async def start(message: Message, state: FSMContext):
     await message.answer(
@@ -131,7 +265,10 @@ async def process_model(message: Message, state: FSMContext):
 
 @dp.message(Form.out)
 async def process_city(message: Message, state: FSMContext):
+    global city, user_address
     await state.update_data(city=message.text)
+    city = message.text
+
     user_data = await state.get_data()
 
     brand = user_data['brand']
@@ -140,87 +277,38 @@ async def process_city(message: Message, state: FSMContext):
 
     search_text = f"Автосервис {brand} {model} в {city}"
 
-    try:
-        # Геокодирование через Яндекс.API
-        geocoder_url = "https://geocode-maps.yandex.ru/1.x/"
-        params = {
-            "apikey": YANDEX_API_KEY,
-            "geocode": search_text,
-            "format": "json",
-            "results": 1,
-            "lang": "ru_RU"
-        }
+    auto = find_auto_services(brand, model, city)
+    user_coords = get_coords(city, user_address)
+    sorted_list = sort_services_by_distance(auto, user_coords)
 
-        response = requests.get(geocoder_url, params=params)
-        data = response.json()
+    res = list(sorted_list.items())[0]
 
-        features = data["response"]["GeoObjectCollection"]["featureMember"]
-        if not features:
-            await message.answer("Ничего не найдено по вашему запросу.")
-            # Сохраняем без адреса
-            save_user_search(
-                user_id=message.from_user.id,
-                username=message.from_user.username,
-                first_name=message.from_user.first_name,
-                last_name=message.from_user.last_name,
-                brand=brand,
-                model=model,
-                city=city
-            )
-            await state.clear()
-            return
 
-        geo_object = features[0]["GeoObject"]
-        coords = geo_object["Point"]["pos"]
-        address = geo_object["metaDataProperty"]["GeocoderMetaData"]["text"]
-        longitude, latitude = coords.split()
 
-        # Получение карты
-        map_url = "https://static-maps.yandex.ru/1.x/"
-        map_params = {
-            "ll": f"{longitude},{latitude}",
-            "spn": "0.005,0.005",
-            "l": "map",
-            "pt": f"{longitude},{latitude},pm2rdm"
-        }
+    address = None
+    coordinates = None
+    for name, info in dict([res]).items():
+        address = info['адрес']
+        coordinates = (info['координаты']['долгота'], info['координаты']['широта'])
 
-        map_response = requests.get(map_url, params=map_params)
+    await message.answer(f"Найден адрес: "
+                         f"{address}")
 
-        await message.answer(f"🔍 Найден автосервис:\n📍 Адрес: {address}")
+    await send_map_image(message, coordinates)
 
-        # Создаем временный файл в памяти и отправляем его
-        img_bytes = BytesIO()
-        img = Image.open(BytesIO(map_response.content))
-        img.save(img_bytes, format='PNG')
-        img_bytes.seek(0)
-
-        await message.answer_photo(types.BufferedInputFile(img_bytes.read(), filename="map.png"))
-
-        # Сохраняем данные с найденным адресом
-        save_user_search(
-            user_id=message.from_user.id,
-            username=message.from_user.username,
-            first_name=message.from_user.first_name,
-            last_name=message.from_user.last_name,
-            brand=brand,
-            model=model,
-            city=city,
-            found_address=address
-        )
-
-    except Exception as e:
-        # Сохраняем без адреса
-        save_user_search(
-            user_id=message.from_user.id,
-            username=message.from_user.username,
-            first_name=message.from_user.first_name,
-            last_name=message.from_user.last_name,
-            brand=brand,
-            model=model,
-            city=city
-        )
+    save_user_search(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        brand=brand,
+        model=model,
+        city=city,
+        found_address=address
+    )
 
     await state.clear()
+
 
 @dp.message(or_f(Command("static"), (F.text.lower() == "статистика")))
 async def show_statistics(message: Message):
@@ -262,6 +350,27 @@ async def clear_data(message: Message):
         await message.answer(f"✅ Все ваши данные ({deleted_rows} записей) были удалены из базы.")
     else:
         await message.answer("ℹ️ У вас нет данных для удаления.")
+
+
+@dp.message(or_f(Command("address"), (F.text.lower() == "адрес")))
+async def handle_address(message: types.Message, state: FSMContext):
+    global user_address
+
+    if user_address:
+        await message.answer(f"Текущий сохранённый адрес: {user_address}")
+        return
+
+    # Если адреса нет - запрашиваем его
+    await message.answer("Пожалуйста, введите ваш адрес:")
+    await state.set_state(Form.waiting_for_address)
+
+
+@dp.message(Form.waiting_for_address)
+async def save_address(message: types.Message, state: FSMContext):
+    global user_address
+    user_address = message.text
+    await message.answer(f"Адрес сохранён: {user_address}")
+    await state.clear()
 
 
 async def main():
