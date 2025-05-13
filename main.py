@@ -7,7 +7,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
 from io import BytesIO
 from PIL import Image
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 import math
 
 YANDEX_API_KEY = '8013b162-6b42-4997-9691-77b7074026e0'
@@ -352,25 +352,53 @@ async def clear_data(message: Message):
         await message.answer("ℹ️ У вас нет данных для удаления.")
 
 
-@dp.message(or_f(Command("address"), (F.text.lower() == "адрес")))
+@dp.message(F.text.lower() == "адрес")
 async def handle_address(message: types.Message, state: FSMContext):
     global user_address
 
-    if user_address:
-        await message.answer(f"Текущий сохранённый адрес: {user_address}")
-        return
+    # inline-кнопка
+    change_button = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Сменить адрес", callback_data="change_address")]
+        ]
+    )
 
-    # Если адреса нет - запрашиваем его
-    await message.answer("Пожалуйста, введите ваш адрес:")
-    await state.set_state(Form.waiting_for_address)
+    if user_address:
+        await message.answer(
+            f"Текущий адрес:\n{user_address}",
+            reply_markup=change_button
+        )
+    else:
+        await message.answer("Введите ваш адрес:")
+        await state.set_state(Form.waiting_for_address)
+
+
+@dp.callback_query(F.data == "change_address")
+async def change_address_callback(callback: types.CallbackQuery):
+    global user_address
+    await callback.message.edit_reply_markup()
+    await callback.message.answer("Введите новый адрес:")
+    await callback.answer()
 
 
 @dp.message(Form.waiting_for_address)
-async def save_address(message: types.Message, state: FSMContext):
+async def save_address(message: types.Message):
     global user_address
-    user_address = message.text
-    await message.answer(f"Адрес сохранён: {user_address}")
-    await state.clear()
+
+    global_address = message.text
+
+    # кнопка для смены адреса
+    change_button = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Сменить адрес", callback_data="change_address")]
+        ]
+    )
+
+    await message.answer(
+        f"Адрес сохранён:\n{global_address}",
+        reply_markup=change_button
+    )
+    print(global_address)
 
 
 async def main():
