@@ -9,9 +9,12 @@ from io import BytesIO
 from PIL import Image
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 import math
+from aiogram.enums import ParseMode
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.default import DefaultBotProperties
 
-YANDEX_API_KEY = '8013b162-6b42-4997-9691-77b7074026e0'
-BOT_TOKEN = '7253763825:AAHLEW4kCm7b-eOTcRwgtKSNpcqiVABfaDA'
+YANDEX_API_KEY = 'yandex_api'
+BOT_TOKEN = 'bot_api'
 
 user_address = None
 city = None
@@ -43,7 +46,6 @@ def init_db():
 
 init_db()
 
-bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 start_kb = ReplyKeyboardMarkup(keyboard=[[
@@ -125,11 +127,8 @@ def get_coords(city, address):
     return {"широта": float(latitude), "долгота": float(longitude)}
 
 
-
 def find_auto_services(brand, model, city):
     # Ввод данных через консоль
-
-
 
     search_text = f"Автосервис {brand} {model} в {city}"
 
@@ -235,7 +234,6 @@ async def send_map_image(message: Message, coordinates: tuple, zoom=15):
         await message.answer("Не удалось загрузить карту")
 
 
-
 @dp.message(Command("start"))
 async def start(message: Message, state: FSMContext):
     await message.answer(
@@ -282,8 +280,6 @@ async def process_city(message: Message, state: FSMContext):
     sorted_list = sort_services_by_distance(auto, user_coords)
 
     res = list(sorted_list.items())[0]
-
-
 
     address = None
     coordinates = None
@@ -402,6 +398,14 @@ async def save_address(message: types.Message):
 
 
 async def main():
+    session = AiohttpSession(proxy="http://proxy.server:3128")
+
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        session=session
+    )
+
     await dp.start_polling(bot)
 
 
